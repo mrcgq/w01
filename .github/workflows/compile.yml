@@ -1,4 +1,4 @@
-name: Compile WASM Artifact (Reliable Version)
+name: Compile WASM Artifact (Fixed Path)
 
 on:
   push:
@@ -17,23 +17,22 @@ jobs:
         with:
           go-version: '1.22'
 
-      # 不使用第三方 Action，直接手动下载安装 TinyGo
       - name: Install TinyGo Manually
         run: |
           wget https://github.com/tinygo-org/tinygo/releases/download/v0.35.0/tinygo_0.35.0_amd64.deb
           sudo dpkg -i tinygo_0.35.0_amd64.deb
-          echo "/usr/local/bin" >> $GITHUB_PATH
+          # 确保系统能立刻识别 tinygo 命令
+          echo "/usr/bin" >> $GITHUB_PATH
 
       - name: Build Core WASM
         run: |
-          # 1. 编译 Go 到 WASM (TinyGo 安装后就在系统路径中)
+          # 1. 编译 Go
           tinygo build -o core.wasm -target wasm ./core.go
           
-          # 2. 提取胶水 JS 文件
-          # TinyGo 默认安装在 /usr/lib/tinygo
-          cp /usr/lib/tinygo/targets/wasm_exec.js .
+          # 2. 通过 tinygo env 自动定位并拷贝胶水 JS
+          cp "$(tinygo env TINYGOROOT)/targets/wasm_exec.js" .
           
-          # 3. 注入 ES Module 支持代码
+          # 3. 注入支持代码
           echo "" >> wasm_exec.js
           echo "export const Go = globalThis.Go;" >> wasm_exec.js
 
