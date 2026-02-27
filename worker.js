@@ -1,5 +1,5 @@
 // =========================================================================================
-// Xlink 21.7 v14 (WASM Enhanced Edition - v21.7 Kernel Compatible)
+// Xlink 21.7 v14 (WASM Enhanced Edition - IPv6 Hotfix)
 // =========================================================================================
 import { connect } from "cloudflare:sockets";
 import wasmCode from "./core.wasm";
@@ -14,12 +14,10 @@ const CONNECT_CONFIG = {
 	SOCKS5_TIMEOUT: 3000,
 	DIRECT_TIMEOUT: 4000,
 	FALLBACK_TIMEOUT: 4000,
-	// 🔥 升级点 1: 扩容缓冲区以兼容 v21.7 的“抢跑”行为
 	MAX_BUFFER_SIZE: 8 * 1024 * 1024,
 	MAX_EMPTY_READS: 100,
 };
 
-// WASM 实例缓存
 let wasmInitialized = false;
 import "./wasm_exec.js";
 
@@ -79,71 +77,42 @@ async function handleSession(webSocket, env) {
 	let remoteSocket = null;
 
 	try {
-		// 🔥 升级点 2: 循环读取，直到WASM成功解析头部，解决 WebSocket 拆包问题
 		let accumulatedBuffer = new Uint8Array(0);
 		let parsed = null;
 		let readCount = 0;
-		const MAX_READ_COUNT = 10; // 防止无限循环
+		const MAX_READ_COUNT = 10;
 
 		while (readCount < MAX_READ_COUNT) {
 			const { value: chunk, done } = await reader.read();
-			if (done) {
-				console.warn("[session] Connection closed before header was parsed.");
-				return;
-			}
+			if (done) return;
 			
-			// 合并当前收到的数据
 			const newBuf = new Uint8Array(accumulatedBuffer.length + chunk.length);
 			newBuf.set(accumulatedBuffer);
 			newBuf.set(chunk, accumulatedBuffer.length);
 			accumulatedBuffer = newBuf;
 
-			// 让 WASM 尝试解析
 			parsed = globalThis.wasmParseHeader(accumulatedBuffer);
 
-			if (parsed && parsed.status === "success") {
-				break; // 握手包已完整，跳出循环
-			}
-			if (parsed && parsed.status === "error") {
-				console.error("[session] WASM parse error:", parsed.message);
-				return;
-			}
-			// 如果是 "need_more"，则继续下一次 read()
+			if (parsed && parsed.status === "success") break;
+			if (parsed && parsed.status === "error") return;
 			readCount++;
 		}
 		
-		if (!parsed || parsed.status !== "success") {
-			console.warn("[session] Failed to parse header after multiple reads.");
-			return;
-		}
+		if (!parsed || parsed.status !== "success") return;
 
 		const host = parsed.host;
 		const port = parsed.port;
 		const finalS5 = parsed.s5 || (env.SOCKS5_SERVER || SERVER_CONFIG.SERVER_SOCKS5);
 		const finalFB = parsed.fb || (env.FALLBACK_SERVER || SERVER_CONFIG.DEFAULT_FALLBACK);
-
-		// 🔥 升级点 3: 精准剥离嗅探到的数据
 		const initialPayload = accumulatedBuffer.slice(parsed.offset);
 
 		const strategies = [
-			{
-				name: "SOCKS5",
-				enabled: !!finalS5,
-				factory: () => createS5Socket(finalS5, host, port, CONNECT_CONFIG.SOCKS5_TIMEOUT)
-			},
-			{
-				name: "Direct",
-				enabled: true,
-				factory: () => tryConnect({ hostname: host, port }, CONNECT_CONFIG.DIRECT_TIMEOUT)
-			},
-			{
-				name: "Fallback",
-				enabled: !!finalFB,
-				factory: () => {
-					const [fh, fp] = parseHostPort(finalFB, 443);
-					return tryConnect({ hostname: fh, port: fp }, CONNECT_CONFIG.FALLBACK_TIMEOUT);
-				}
-			},
+			{ name: "SOCKS5", enabled: !!finalS5, factory: () => createS5Socket(finalS5, host, port, CONNECT_CONFIG.SOCKS5_TIMEOUT) },
+			{ name: "Direct", enabled: true, factory: () => tryConnect({ hostname: host, port }, CONNECT_CONFIG.DIRECT_TIMEOUT) },
+			{ name: "Fallback", enabled: !!finalFB, factory: () => {
+				const [fh, fp] = parseHostPort(finalFB, 443);
+				return tryConnect({ hostname: fh, port: fp }, CONNECT_CONFIG.FALLBACK_TIMEOUT);
+			}},
 		];
 
 		for (const { name, enabled, factory } of strategies) {
@@ -156,27 +125,16 @@ async function handleSession(webSocket, env) {
 			}
 		}
 
-		if (!remoteSocket) {
-			console.warn(`[session] All connection strategies failed for ${host}:${port}`);
-			return;
-		}
+		if (!remoteSocket) return;
 
 		const writer = remoteSocket.writable.getWriter();
-		
-		// 🔥 关键一步：先将剥离出的嗅探数据写入上游
 		if (initialPayload.length > 0) {
 			await writer.write(initialPayload);
 		}
-		
-		// 释放锁，准备进入零拷贝转发
 		writer.releaseLock();
 
-		// 由于 reader 已经被消费，不能再直接 pipe wsReadable。
-		// 我们创建一个新的 TransformStream 来代理剩余的数据流。
 		const remainderStream = new TransformStream();
 		const remainderWriter = remainderStream.writable.getWriter();
-		
-		// 异步地将 wsReadable 剩余部分泵入新流
 		(async () => {
 			try {
 				while(true) {
@@ -191,7 +149,6 @@ async function handleSession(webSocket, env) {
 			}
 		})();
 		
-		// 使用新创建的流进行 pipeTo
 		await bidirectionalPipe(remainderStream.readable, wsWritable, remoteSocket);
 
 	} catch (err) {
@@ -201,6 +158,7 @@ async function handleSession(webSocket, env) {
 		safeClose(webSocket);
 	}
 }
+
 
 // =========================================================================================
 // Bidirectional Pipe
@@ -221,9 +179,7 @@ async function bidirectionalPipe(wsReadable, wsWritable, remoteSocket) {
 	const pipe2 = remoteSocket.readable.pipeTo(wsWritable, pipeOptions).catch(() => {});
 	
 	await Promise.race([pipe1, pipe2]);
-
 	ac.abort();
-
 	await Promise.allSettled([pipe1, pipe2]);
 	
 	try { await wsReadable.cancel(); } catch {}
@@ -341,23 +297,51 @@ function websocketToStreams(ws) {
 // Utilities
 // =========================================================================================
 
+// 🔥 终极修复：引入能正确处理 IPv6 地址的 parseHostPort
 function parseHostPort(s, defaultPort) {
-	if (!s || typeof s !== "string") return ["", defaultPort];
-	const ipv6Match = s.match(/^\[(.+)\]:(\d+)$/);
-	if (ipv6Match) {
-		const port = parseInt(ipv6Match[2], 10);
-		if (isValidPort(port)) return [ipv6Match[1], port];
-		return [ipv6Match[1], defaultPort];
-	}
-	if (s.startsWith("[") && s.endsWith("]")) return [s.slice(1, -1), defaultPort];
-	const lastColon = s.lastIndexOf(":");
-	if (lastColon === -1 || s.slice(0, lastColon).includes(":")) return [s, defaultPort];
-	const host = s.slice(0, lastColon);
-	const portStr = s.slice(lastColon + 1);
-	const port = parseInt(portStr, 10);
-	if (!isValidPort(port)) return [s, defaultPort];
-	return [host, port];
+    if (!s || typeof s !== 'string') return ['', defaultPort];
+
+    // Case 1: IPv6 with port, e.g., "[2001:db8::1]:8080"
+    const ipv6WithPortMatch = s.match(/^\[(.+)\]:(\d+)$/);
+    if (ipv6WithPortMatch) {
+        const port = parseInt(ipv6WithPortMatch[2], 10);
+        if (isValidPort(port)) {
+            return [ipv6WithPortMatch[1], port];
+        }
+        return [ipv6WithPortMatch[1], defaultPort];
+    }
+
+    // Case 2: IPv6 without port, e.g., "[2001:db8::1]" or "2001:db8::1"
+    // This is the key fix: if it contains colons, it's likely an IPv6 address.
+    if (s.includes(':')) {
+        // If it's wrapped in brackets, remove them.
+        const host = s.startsWith('[') && s.endsWith(']') ? s.slice(1, -1) : s;
+        // Assume no port is provided for a raw IPv6 address.
+        return [host, defaultPort];
+    }
+    
+    // Case 3: IPv4 or domain name with port, e.g., "1.2.3.4:8080" or "google.com:443"
+    const lastColon = s.lastIndexOf(":");
+    if (lastColon === -1) {
+        return [s, defaultPort]; // No port found
+    }
+
+    const host = s.slice(0, lastColon);
+    const portStr = s.slice(lastColon + 1);
+    
+    // If what's before the last colon also has a colon, it was an IPv6 address all along.
+    if (host.includes(':')) {
+        return [s, defaultPort];
+    }
+
+    const port = parseInt(portStr, 10);
+    if (!isValidPort(port)) {
+        return [s, defaultPort]; // Invalid port, return original string
+    }
+
+    return [host, port];
 }
+
 
 function isValidPort(port) {
 	return Number.isInteger(port) && port >= 1 && port <= 65535;
