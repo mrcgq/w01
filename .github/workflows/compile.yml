@@ -1,9 +1,9 @@
-name: Compile WASM Artifact
+name: Compile WASM Artifact (Reliable Version)
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # 允许你手动点击按钮触发编译
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -17,27 +17,30 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Setup TinyGo
-        uses: tinygo-org/setup-tinygo@v2
-        with:
-          tinygo-version: '0.31.2'
+      # 不使用第三方 Action，直接手动下载安装 TinyGo
+      - name: Install TinyGo Manually
+        run: |
+          wget https://github.com/tinygo-org/tinygo/releases/download/v0.35.0/tinygo_0.35.0_amd64.deb
+          sudo dpkg -i tinygo_0.35.0_amd64.deb
+          echo "/usr/local/bin" >> $GITHUB_PATH
 
       - name: Build Core WASM
         run: |
-          # 1. 编译 Go
+          # 1. 编译 Go 到 WASM (TinyGo 安装后就在系统路径中)
           tinygo build -o core.wasm -target wasm ./core.go
           
-          # 2. 提取匹配的胶水 JS
-          cp $(tinygo env TINYGOROOT)/targets/wasm_exec.js .
+          # 2. 提取胶水 JS 文件
+          # TinyGo 默认安装在 /usr/lib/tinygo
+          cp /usr/lib/tinygo/targets/wasm_exec.js .
           
-          # 3. 注入 ES Module 支持代码（CF Worker 必须）
+          # 3. 注入 ES Module 支持代码
           echo "" >> wasm_exec.js
           echo "export const Go = globalThis.Go;" >> wasm_exec.js
 
       - name: Upload Finished Files
         uses: actions/upload-artifact@v4
         with:
-          name: xlink-wasm-bundle  # 下载时的压缩包名字
+          name: xlink-wasm-bundle
           path: |
             core.wasm
             wasm_exec.js
