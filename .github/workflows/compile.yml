@@ -1,4 +1,4 @@
-name: Compile WASM Artifact (Fixed Path)
+name: Compile WASM Artifact (Fix Go Version)
 
 on:
   push:
@@ -12,25 +12,30 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      # 强制安装 Go 1.23，因为 TinyGo 0.35 还不支持 Go 1.24
+      - name: Setup Go 1.23
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Install TinyGo Manually
         run: |
           wget https://github.com/tinygo-org/tinygo/releases/download/v0.35.0/tinygo_0.35.0_amd64.deb
           sudo dpkg -i tinygo_0.35.0_amd64.deb
-          # 确保系统能立刻识别 tinygo 命令
+          # 确保优先使用我们刚才安装的 tinygo
           echo "/usr/bin" >> $GITHUB_PATH
 
       - name: Build Core WASM
         run: |
+          # 检查版本，确保是 1.23
+          go version
+          
           # 1. 编译 Go
           tinygo build -o core.wasm -target wasm ./core.go
           
-          # 2. 通过 tinygo env 自动定位并拷贝胶水 JS
-          cp "$(tinygo env TINYGOROOT)/targets/wasm_exec.js" .
+          # 2. 定位胶水 JS 文件
+          TINYGO_ROOT=$(tinygo env TINYGOROOT)
+          cp "$TINYGO_ROOT/targets/wasm_exec.js" .
           
           # 3. 注入支持代码
           echo "" >> wasm_exec.js
