@@ -1,0 +1,7 @@
+name = "xlink-wasm-worker"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[wasm_modules]
+# 告诉 CF 把这个文件当做 WASM 模块处理
+core = "core.wasm"
