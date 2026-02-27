@@ -1,0 +1,44 @@
+name: Compile WASM Artifact
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # 允许你手动点击按钮触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup TinyGo
+        uses: tinygo-org/setup-tinygo@v2
+        with:
+          tinygo-version: '0.31.2'
+
+      - name: Build Core WASM
+        run: |
+          # 1. 编译 Go
+          tinygo build -o core.wasm -target wasm ./core.go
+          
+          # 2. 提取匹配的胶水 JS
+          cp $(tinygo env TINYGOROOT)/targets/wasm_exec.js .
+          
+          # 3. 注入 ES Module 支持代码（CF Worker 必须）
+          echo "" >> wasm_exec.js
+          echo "export const Go = globalThis.Go;" >> wasm_exec.js
+
+      - name: Upload Finished Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlink-wasm-bundle  # 下载时的压缩包名字
+          path: |
+            core.wasm
+            wasm_exec.js
+            worker.js
